@@ -15,6 +15,24 @@ const fs = require('fs');
 const { Client } = require("@googlemaps/google-maps-services-js");
 const googleMapsClient = new Client({});
 const cors = require('cors');
+// This code is the "bridge" between Railway and your App
+// const allowedOrigins = process.env.CORS_ORIGIN 
+//   ? process.env.CORS_ORIGIN.split(',') // This creates the list of 3 URLs
+//   : ["http://localhost:3000"];
+
+// app.use(cors({
+//   origin: (origin, callback) => {
+//     if (!origin) return callback(null, true);
+    
+//     // Now it checks if your URL is ONE of the items in the list
+//     if (allowedOrigins.includes(origin)) {
+//       callback(null, true);
+//     } else {
+//       callback(new Error('Not allowed by CORS'));
+//     }
+//   },
+//   credentials: true
+// }));
 
 // ★★★ NEW IMPORTS FOR REAL-TIME CHAT ★★★
 const http = require('http');
@@ -11021,6 +11039,166 @@ app.post('/api/lesson-feedback/teacher/mark', async (req, res) => {
         res.json({ success: true, message: "Marks and remarks saved successfully!" });
     } catch (error) {
         console.error("Error saving marks:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+// ==========================================================
+// --- NEW APIs FOR TEACHER GUIDE & IMPROVED FLOW ---
+// ==========================================================
+
+// 1. [TEACHER/STUDENT] Get Teacher's Guide for a specific lesson
+app.get('/api/lesson-feedback/guide/:class_group/:subject_name/:lesson_name', async (req, res) => {
+    try {
+        const { class_group, subject_name, lesson_name } = req.params;
+        const [guide] = await db.query(
+            `SELECT * FROM teacher_lesson_guides 
+             WHERE class_group = ? AND subject_name = ? AND lesson_name = ?`,[class_group, subject_name, lesson_name]
+        );
+        res.json(guide[0] || null);
+    } catch (error) {
+        console.error("Error fetching guide:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 2. [TEACHER] Save Teacher Guide Answers
+app.post('/api/lesson-feedback/teacher/guide/submit', async (req, res) => {
+    try {
+        const { class_group, subject_name, lesson_name, teacher_id, guide_answers } = req.body;
+        const answersJson = JSON.stringify(guide_answers);
+
+        await db.query(
+            `INSERT INTO teacher_lesson_guides (class_group, subject_name, lesson_name, teacher_id, guide_answers)
+             VALUES (?, ?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE guide_answers = VALUES(guide_answers), teacher_id = VALUES(teacher_id)`,
+            [class_group, subject_name, lesson_name, teacher_id, answersJson]
+        );
+        res.json({ success: true, message: "Teacher guide saved successfully!" });
+    } catch (error) {
+        console.error("Error submitting guide:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 3.[TEACHER/ADMIN] Get all lessons for a Subject with Guide Status
+app.get('/api/lesson-feedback/teacher/subject-lessons/:class_group/:subject_name', async (req, res) => {
+    try {
+        const { class_group, subject_name } = req.params;
+        const [lessons] = await db.query(
+            `SELECT sl.id, sl.lesson_name
+             FROM syllabuses s
+             JOIN syllabus_lessons sl ON s.id = sl.syllabus_id
+             WHERE s.class_group = ? AND s.subject_name = ?
+             ORDER BY sl.to_date ASC`,
+            [class_group, subject_name]
+        );
+        const [guides] = await db.query(
+            `SELECT lesson_name FROM teacher_lesson_guides WHERE class_group = ? AND subject_name = ?`,
+            [class_group, subject_name]
+        );
+        const guideMap = new Set(guides.map(g => g.lesson_name));
+        
+        const result = lessons.map(l => ({
+            ...l,
+            has_guide: guideMap.has(l.lesson_name)
+        }));
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 4. [TEACHER/ADMIN] Get all Students submission status for a SPECIFIC LESSON
+app.get('/api/lesson-feedback/teacher/lesson-students-status/:class_group/:subject_name/:lesson_name', async (req, res) => {
+    try {
+        const { class_group, subject_name, lesson_name } = req.params;
+        const [students] = await db.query(
+            `SELECT u.id as student_id, u.full_name, p.roll_no
+             FROM users u
+             LEFT JOIN user_profiles p ON u.id = p.user_id
+             WHERE u.role = 'student' AND u.class_group = ?
+             ORDER BY CAST(p.roll_no AS UNSIGNED) ASC`, [class_group]
+        );
+        const [feedbacks] = await db.query(
+            `SELECT student_id, is_marked, answers FROM lesson_feedbacks 
+             WHERE class_group = ? AND subject_name = ? AND lesson_name = ?`,[class_group, subject_name, lesson_name]
+        );
+        
+        const result = students.map(st => {
+            const fb = feedbacks.find(f => f.student_id === st.student_id);
+            return {
+                ...st,
+                is_submitted: !!fb,
+                is_marked: fb ? (fb.is_marked === 1 || fb.is_marked === true) : false,
+                obtained_marks: fb && (fb.is_marked === 1 || fb.is_marked === true) ? calculateScore(fb.answers) : 0,
+                max_marks: 10
+            };
+        });
+        res.json(result);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+
+
+// ==========================================================
+// --- LESSON KEYWORDS API ROUTES ---
+// ==========================================================
+
+// 1. [ALL ROLES] Get all keywords for a specific lesson
+app.get('/api/lesson-keywords/:class_group/:subject_name/:lesson_name', async (req, res) => {
+    try {
+        const { class_group, subject_name, lesson_name } = req.params;
+        const[keywords] = await db.query(
+            `SELECT * FROM lesson_keywords 
+             WHERE class_group = ? AND subject_name = ? AND lesson_name = ?
+             ORDER BY updated_at DESC`,[class_group, subject_name, lesson_name]
+        );
+        res.json(keywords);
+    } catch (error) {
+        console.error("Error fetching keywords:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 2.[TEACHER/ADMIN] Save (Insert or Update) a keyword
+app.post('/api/lesson-keywords/save', async (req, res) => {
+    try {
+        const { id, class_group, subject_name, lesson_name, word, meaning, definition, example, user_id } = req.body;
+        
+        if (id) {
+            // Update existing keyword
+            await db.query(
+                `UPDATE lesson_keywords 
+                 SET word = ?, meaning = ?, definition = ?, example = ?
+                 WHERE id = ?`,
+                [word, meaning, definition, example, id]
+            );
+            res.json({ success: true, message: "Keyword updated successfully!" });
+        } else {
+            // Insert new keyword
+            await db.query(
+                `INSERT INTO lesson_keywords (class_group, subject_name, lesson_name, word, meaning, definition, example, created_by)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,[class_group, subject_name, lesson_name, word, meaning, definition, example, user_id]
+            );
+            res.json({ success: true, message: "Keyword added successfully!" });
+        }
+    } catch (error) {
+        console.error("Error saving keyword:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 3. [TEACHER/ADMIN] Delete a keyword
+app.delete('/api/lesson-keywords/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        await db.query(`DELETE FROM lesson_keywords WHERE id = ?`, [id]);
+        res.json({ success: true, message: "Keyword deleted successfully!" });
+    } catch (error) {
+        console.error("Error deleting keyword:", error);
         res.status(500).json({ error: error.message });
     }
 });
