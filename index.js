@@ -15,24 +15,6 @@ const fs = require('fs');
 const { Client } = require("@googlemaps/google-maps-services-js");
 const googleMapsClient = new Client({});
 const cors = require('cors');
-// This code is the "bridge" between Railway and your App
-// const allowedOrigins = process.env.CORS_ORIGIN 
-//   ? process.env.CORS_ORIGIN.split(',') // This creates the list of 3 URLs
-//   : ["http://localhost:3000"];
-
-// app.use(cors({
-//   origin: (origin, callback) => {
-//     if (!origin) return callback(null, true);
-    
-//     // Now it checks if your URL is ONE of the items in the list
-//     if (allowedOrigins.includes(origin)) {
-//       callback(null, true);
-//     } else {
-//       callback(new Error('Not allowed by CORS'));
-//     }
-//   },
-//   credentials: true
-// }));
 
 // ★★★ NEW IMPORTS FOR REAL-TIME CHAT ★★★
 const http = require('http');
@@ -11199,6 +11181,90 @@ app.delete('/api/lesson-keywords/:id', async (req, res) => {
         res.json({ success: true, message: "Keyword deleted successfully!" });
     } catch (error) {
         console.error("Error deleting keyword:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+
+
+// ==========================================================
+// --- PERMANENT STORAGE (ASSETS) API ROUTES ---
+// ==========================================================
+
+// Multer storage for Permanent Storage items
+const permanentStorageStorage = multer.diskStorage({
+    destination: (req, file, cb) => { cb(null, '/data/uploads'); },
+    filename: (req, file, cb) => {
+        cb(null, generateUniqueFilename(file.originalname, 'permanent-asset'));
+    }
+});
+const permanentAssetUpload = multer({ storage: permanentStorageStorage });
+
+// 1.[ADMIN] Get all permanent storage items (Alphabetical Order)
+app.get('/api/permanent-storage', verifyToken, isAdmin, async (req, res) => {
+    try {
+        const [items] = await db.query('SELECT * FROM permanent_storage ORDER BY item_name ASC');
+        res.json(items);
+    } catch (error) {
+        console.error("Error fetching storage items:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 2. [ADMIN] Add a new permanent storage item
+app.post('/api/permanent-storage', verifyToken, isAdmin, permanentAssetUpload.single('image'), async (req, res) => {
+    try {
+        const { item_name, quantity, rack } = req.body;
+        let image_url = null;
+        
+        if (req.file) {
+            image_url = `/uploads/${req.file.filename}`;
+        }
+
+        await db.query(
+            'INSERT INTO permanent_storage (item_name, image_url, quantity, rack) VALUES (?, ?, ?, ?)',[item_name, image_url, quantity || 0, rack || '']
+        );
+        res.status(201).json({ success: true, message: "Asset added successfully!" });
+    } catch (error) {
+        console.error("Error adding storage item:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 3. [ADMIN] Update an existing permanent storage item (for quantity updates, broken items, etc.)
+app.put('/api/permanent-storage/:id', verifyToken, isAdmin, permanentAssetUpload.single('image'), async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { item_name, quantity, rack } = req.body;
+        
+        let updateQuery = 'UPDATE permanent_storage SET item_name = ?, quantity = ?, rack = ?';
+        let queryParams = [item_name, quantity, rack];
+
+        // Only update image if a new one is uploaded
+        if (req.file) {
+            updateQuery += ', image_url = ?';
+            queryParams.push(`/uploads/${req.file.filename}`);
+        }
+        
+        updateQuery += ' WHERE id = ?';
+        queryParams.push(id);
+
+        await db.query(updateQuery, queryParams);
+        res.json({ success: true, message: "Asset updated successfully!" });
+    } catch (error) {
+        console.error("Error updating storage item:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// 4. [ADMIN] Delete a permanent storage item
+app.delete('/api/permanent-storage/:id', verifyToken, isAdmin, async (req, res) => {
+    try {
+        const { id } = req.params;
+        await db.query('DELETE FROM permanent_storage WHERE id = ?',[id]);
+        res.json({ success: true, message: "Asset deleted successfully!" });
+    } catch (error) {
+        console.error("Error deleting storage item:", error);
         res.status(500).json({ error: error.message });
     }
 });
